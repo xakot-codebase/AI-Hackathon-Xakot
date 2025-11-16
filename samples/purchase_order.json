@@ -1,0 +1,17 @@
+{
+  "doc_type": "purchase_order",
+  "source": { "channel": "webhook", "filename": "po_al_madina.json" },
+  "party": {
+    "buyer": { "name": "Al Madina", "id": "BUY-001" },
+    "supplier": { "name": "Prime Meats", "id": "SUP-442" }
+  },
+  "lines": [
+    { "sku": "MEAT-RIBEYE-1KG", "desc": "Meat - ribeye", "qty": 18, "uom": "kg", "unit_price": 8.0 }
+  ],
+  "totals": { "subtotal": 144.0, "tax": 0.0, "grand_total": 144.0, "currency": "USD" },
+  "compliance": { "certs": ["halal"] },
+  "logistics": {
+    "from_coords": "55.2708,25.2048",
+    "to_coords": "55.3200,25.1200"
+  }
+}

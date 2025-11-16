@@ -1,0 +1,28 @@
+[
+  {
+    "doc_type": "invoice",
+    "source": { "channel": "email", "filename": "inv_1.json" },
+    "party": {
+      "buyer": { "name": "Al Madina", "id": "BUY-001" },
+      "supplier": { "name": "Prime Meats", "id": "SUP-442" }
+    },
+    "lines": [
+      { "sku": "MEAT-RIBEYE-1KG", "desc": "Meat - ribeye", "qty": 18, "uom": "kg", "unit_price": 8.0 }
+    ],
+    "totals": { "subtotal": 144.0, "tax": 0.0, "grand_total": 144.0, "currency": "USD" },
+    "compliance": { "certs": ["halal"], "temperature_c": 4.0 }
+  },
+  {
+    "doc_type": "invoice",
+    "source": { "channel": "email", "filename": "inv_2.json" },
+    "party": {
+      "buyer": { "name": "Al Madina", "id": "BUY-001" },
+      "supplier": { "name": "Prime Meats", "id": "SUP-442" }
+    },
+    "lines": [
+      { "sku": "MEAT-RIBEYE-1KG", "desc": "Meat - ribeye", "qty": 25, "uom": "kg", "unit_price": 8.0 }
+    ],
+    "totals": { "subtotal": 200.0, "tax": 0.0, "grand_total": 200.0, "currency": "USD" },
+    "compliance": { "certs": ["halal"], "temperature_c": 6.2 }
+  }
+]

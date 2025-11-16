@@ -1,0 +1,17 @@
+stock_rules:
+  auto_replenish_if_below_kg: 20
+  allowed_skus:
+    - MEAT-RIBEYE-1KG
+    - MEAT-TBONE-1KG
+
+invoice_rules:
+  currency_allowlist:
+    - USD
+    - AED
+    - ZAR
+    - INR
+  max_line_variance_pct: 3
+
+compliance_rules:
+  require_halal_for_meat: true
+  max_temperature_c: 5.0
