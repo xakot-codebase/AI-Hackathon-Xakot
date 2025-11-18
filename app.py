@@ -22,7 +22,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("xakot")
 
 APP_DIR = os.path.dirname(__file__)
-AUDIT_LOG = os.path.join(APP_DIR, "audit.jl")
+
+# Use /tmp for audit log in serverless environments (Vercel, AWS Lambda, etc.)
+# Vercel has read-only filesystem except for /tmp
+if os.path.exists("/tmp") and os.access("/tmp", os.W_OK):
+    AUDIT_LOG = os.path.join("/tmp", "audit.jl")
+else:
+    AUDIT_LOG = os.path.join(APP_DIR, "audit.jl")
+
 RULES_FILE = os.path.join(APP_DIR, "rules.yaml")
 
 app = FastAPI(
