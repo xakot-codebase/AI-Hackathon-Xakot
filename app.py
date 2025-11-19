@@ -1,4 +1,15 @@
 # app.py — Fixed & improved Xakot FastAPI backend
+from dotenv import load_dotenv
+import os
+load_dotenv()
+
+OPUS_API_KEY = os.getenv("OPUS_API_KEY")
+OPUS_SERVICE_KEY = os.getenv("OPUS_SERVICE_KEY")
+OPUS_WORKFLOW_ID = os.getenv("OPUS_WORKFLOW_ID")
+OPUS_BASE_URL = os.getenv("OPUS_BASE_URL", "https://operator.opus.com")
+
+
+
 from fastapi import FastAPI, Request, Body, HTTPException
 from fastapi.responses import FileResponse
 from typing import Optional, List, Dict, Any
@@ -37,7 +48,462 @@ app = FastAPI(
     version="2.0.0",
 )
 
+#Setting up Opus end point
 
+
+
+
+#Create Opus client helper
+
+async def call_opus_workflow(payload: dict, workflow_id: Optional[str] = None):
+    """
+    Execute Opus workflow using the two-step process:
+    1. POST /job/initiate - Initiate a job
+    2. POST /job/execute - Execute the job with payload
+    """
+    # Support both OPUS_API_KEY and OPUS_SERVICE_KEY (like judgment.py)
+    service_key = OPUS_API_KEY or OPUS_SERVICE_KEY
+    if not service_key:
+        raise HTTPException(
+            status_code=500, 
+            detail="OPUS_API_KEY or OPUS_SERVICE_KEY not configured. Please set one in .env file."
+        )
+    
+    workflow_id = workflow_id or OPUS_WORKFLOW_ID
+    if not workflow_id:
+        raise HTTPException(
+            status_code=500,
+            detail="OPUS_WORKFLOW_ID not configured. Please set it in .env file or provide as parameter."
+        )
+    
+    # Use x-service-key header
+    headers = {
+        "x-service-key": service_key,
+        "Content-Type": "application/json"
+    }
+    
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        try:
+            # Step 1: Initiate the job
+            initiate_url = f"{OPUS_BASE_URL.rstrip('/')}/api/v1/job/initiate"
+            initiate_payload = {
+                "workflowId": workflow_id,
+                "title": f"Workflow execution - {workflow_id}",
+                "description": "Executed via Xakot API"
+                # refUserId is optional - only include if you have a valid user ID
+            }
+            
+            logger.info(f"Initiating Opus job for workflow: {workflow_id}")
+            initiate_response = await client.post(initiate_url, headers=headers, json=initiate_payload)
+            
+            # Check for errors in initiate
+            if initiate_response.status_code == 404:
+                # Try alternative endpoint format
+                initiate_url_alt = f"{OPUS_BASE_URL.rstrip('/')}/job/initiate"
+                initiate_response = await client.post(initiate_url_alt, headers=headers, json=initiate_payload)
+            
+            initiate_response.raise_for_status()
+            
+            # Check if response is JSON
+            content_type = initiate_response.headers.get("content-type", "").lower()
+            if "application/json" not in content_type:
+                logger.error(f"Opus initiate returned non-JSON response: {content_type}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Opus API initiate returned non-JSON response (content-type: {content_type})"
+                )
+            
+            initiate_data = initiate_response.json()
+            job_execution_id = initiate_data.get("jobExecutionId")
+            
+            if not job_execution_id:
+                logger.error(f"No jobExecutionId in response: {initiate_data}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Opus API did not return jobExecutionId. Response: {initiate_data}"
+                )
+            
+            logger.info(f"Job initiated successfully. jobExecutionId: {job_execution_id}")
+            
+            # Step 2: Execute the job with payload
+            execute_url = f"{OPUS_BASE_URL.rstrip('/')}/api/v1/job/execute"
+            execute_payload = {
+                "jobExecutionId": job_execution_id,
+                "jobPayloadSchemaInstance": payload  # Direct payload mapping to schema
+            }
+            
+            logger.info(f"Executing Opus job: {job_execution_id}")
+            execute_response = await client.post(execute_url, headers=headers, json=execute_payload)
+            
+            # Check for errors in execute
+            if execute_response.status_code == 404:
+                # Try alternative endpoint format
+                execute_url_alt = f"{OPUS_BASE_URL.rstrip('/')}/job/execute"
+                execute_response = await client.post(execute_url_alt, headers=headers, json=execute_payload)
+            
+            execute_response.raise_for_status()
+            
+            # Check if response is JSON
+            content_type = execute_response.headers.get("content-type", "").lower()
+            if "application/json" not in content_type:
+                logger.error(f"Opus execute returned non-JSON response: {content_type}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Opus API execute returned non-JSON response (content-type: {content_type})"
+                )
+            
+            execute_data = execute_response.json()
+            
+            # Return combined result
+            return {
+                "jobExecutionId": job_execution_id,
+                "run_id": job_execution_id,  # For backward compatibility
+                "status": execute_data.get("status", "executed"),
+                "initiate_response": initiate_data,
+                "execute_response": execute_data
+            }
+            
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Opus API error: {e.response.status_code} - {e.response.text[:500]}")
+            raise HTTPException(
+                status_code=e.response.status_code, 
+                detail=f"Opus API error: {e.response.status_code} - {e.response.text[:500]}"
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Opus request error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Opus request failed: {str(e)}")
+        except HTTPException:
+            raise  # Re-raise HTTPException
+        except Exception as e:
+            logger.error(f"Unexpected error calling Opus API: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+# Helper function to fetch workflow schema
+async def get_opus_workflow_schema(workflow_id: Optional[str] = None):
+    """
+    Fetch workflow details and schema from Opus API.
+    Returns the full workflow response including jobPayloadSchema.
+    """
+    service_key = OPUS_API_KEY or OPUS_SERVICE_KEY
+    if not service_key:
+        raise HTTPException(
+            status_code=500,
+            detail="OPUS_API_KEY or OPUS_SERVICE_KEY not configured. Please set one in .env file."
+        )
+    
+    workflow_id = workflow_id or OPUS_WORKFLOW_ID
+    if not workflow_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workflow_id is required. Either provide it as a parameter or set OPUS_WORKFLOW_ID in .env file."
+        )
+    
+    # Try both API path patterns (docs show /workflow/{id}, but existing code uses /api/v1/workflows/)
+    # Try the documented path first: /workflow/{workflowId}
+    url = f"{OPUS_BASE_URL.rstrip('/')}/workflow/{workflow_id}"
+    
+    headers = {
+        "x-service-key": service_key,
+        "Accept": "application/json"
+    }
+    
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        try:
+            response = await client.get(url, headers=headers)
+            
+            # If 404, try the alternative path pattern
+            if response.status_code == 404:
+                url_alt = f"{OPUS_BASE_URL.rstrip('/')}/api/v1/workflow/{workflow_id}"
+                response = await client.get(url_alt, headers=headers)
+            
+            response.raise_for_status()
+            
+            # Check if we got redirected to a login page
+            if "/login" in str(response.url) or "unauthorized" in str(response.url):
+                logger.error(f"Opus API authentication failed - redirected to login page")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Opus API authentication failed. Please check your OPUS_API_KEY or OPUS_SERVICE_KEY."
+                )
+            
+            # Check if response is JSON
+            content_type = response.headers.get("content-type", "").lower()
+            if "application/json" not in content_type:
+                logger.error(f"Opus API returned non-JSON response: {content_type}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Opus API returned non-JSON response (content-type: {content_type})."
+                )
+            
+            return response.json()
+            
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Opus API error: {e.response.status_code} - {e.response.text[:500]}")
+            raise HTTPException(
+                status_code=e.response.status_code,
+                detail=f"Opus API error: {e.response.status_code} - {e.response.text[:500]}"
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Opus request error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Opus request failed: {str(e)}")
+        except HTTPException:
+            raise  # Re-raise HTTPException
+        except Exception as e:
+            logger.error(f"Unexpected error calling Opus API: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+# Helper endpoint to test Opus API connection
+@app.get("/opus/test")
+async def test_opus_connection():
+    """Test Opus API connection and return configuration info"""
+    service_key = OPUS_API_KEY or OPUS_SERVICE_KEY
+    return {
+        "configured": bool(service_key),
+        "has_workflow_id": bool(OPUS_WORKFLOW_ID),
+        "base_url": OPUS_BASE_URL,
+        "workflow_id": OPUS_WORKFLOW_ID if OPUS_WORKFLOW_ID else "Not set",
+        "endpoint_url": f"{OPUS_BASE_URL.rstrip('/')}/api/v1/workflows/{OPUS_WORKFLOW_ID}/run" if OPUS_WORKFLOW_ID else "Cannot construct (missing workflow_id)",
+        "note": "If you're getting 404, the workflow_id might be incorrect. Check your Opus dashboard for the correct workflow ID."
+    }
+
+# Diagnostic endpoint to test all endpoint formats
+@app.get("/opus/test/endpoints")
+async def test_all_endpoints():
+    """Test all possible endpoint formats and return detailed results"""
+    service_key = OPUS_API_KEY or OPUS_SERVICE_KEY
+    if not service_key:
+        return {"error": "OPUS_API_KEY or OPUS_SERVICE_KEY not configured"}
+    
+    if not OPUS_WORKFLOW_ID:
+        return {"error": "OPUS_WORKFLOW_ID not configured"}
+    
+    endpoint_formats = [
+        f"{OPUS_BASE_URL.rstrip('/')}/api/v1/workflows/{OPUS_WORKFLOW_ID}/run",
+        f"{OPUS_BASE_URL.rstrip('/')}/api/v1/workflow/{OPUS_WORKFLOW_ID}/run",
+        f"{OPUS_BASE_URL.rstrip('/')}/api/v1/workflows/{OPUS_WORKFLOW_ID}/execute",
+        f"{OPUS_BASE_URL.rstrip('/')}/api/v1/workflows/{OPUS_WORKFLOW_ID}/jobs",
+        f"{OPUS_BASE_URL.rstrip('/')}/api/v1/jobs",
+        f"{OPUS_BASE_URL.rstrip('/')}/workflow/{OPUS_WORKFLOW_ID}/run",
+    ]
+    
+    headers = {
+        "x-service-key": service_key,
+        "Content-Type": "application/json"
+    }
+    
+    results = []
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        for url in endpoint_formats:
+            try:
+                # Try with minimal payload
+                test_payload = {"input": {"test": "value"}}
+                if "/api/v1/jobs" in url and "/workflows/" not in url:
+                    test_payload = {"workflow_id": OPUS_WORKFLOW_ID, "input": {"test": "value"}}
+                
+                response = await client.post(url, headers=headers, json=test_payload)
+                results.append({
+                    "url": url,
+                    "status_code": response.status_code,
+                    "success": response.status_code < 400,
+                    "response_preview": response.text[:200] if response.text else "No response body"
+                })
+            except Exception as e:
+                results.append({
+                    "url": url,
+                    "status_code": "error",
+                    "success": False,
+                    "error": str(e)[:200]
+                })
+    
+    return {
+        "workflow_id": OPUS_WORKFLOW_ID,
+        "base_url": OPUS_BASE_URL,
+        "results": results,
+        "note": "Check which endpoint returns a non-404 status code"
+    }
+
+# Endpoint to get workflow schema
+@app.get("/opus/workflow/schema")
+async def get_workflow_schema(workflow_id: Optional[str] = None):
+    """
+    Get workflow details and schema from Opus API.
+    
+    This endpoint retrieves the workflow's jobPayloadSchema which defines all required inputs,
+    their variable names, types, and constraints.
+    
+    Args:
+        workflow_id: Optional workflow ID. If not provided, uses OPUS_WORKFLOW_ID from environment.
+    
+    Returns:
+        Full workflow response including:
+        - workflowId, name, description
+        - workflowBlueprint
+        - jobPayloadSchema (defines all input variables and their types)
+        - jobResultsPayloadSchema
+        - executionEstimation
+    """
+    try:
+        workflow_data = await get_opus_workflow_schema(workflow_id)
+        return workflow_data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching workflow schema")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch workflow schema: {str(e)}")
+
+# Endpoint to get just the jobPayloadSchema (simplified view)
+@app.get("/opus/workflow/schema/inputs")
+async def get_workflow_input_schema(workflow_id: Optional[str] = None):
+    """
+    Get only the jobPayloadSchema from a workflow.
+    
+    This returns a simplified view showing just the input schema with variable names,
+    types, and constraints.
+    
+    Args:
+        workflow_id: Optional workflow ID. If not provided, uses OPUS_WORKFLOW_ID from environment.
+    
+    Returns:
+        Dictionary containing:
+        - workflow_id: The workflow ID
+        - workflow_name: The workflow name
+        - jobPayloadSchema: Dictionary of input variables and their definitions
+    """
+    try:
+        workflow_data = await get_opus_workflow_schema(workflow_id)
+        return {
+            "workflow_id": workflow_data.get("workflowId"),
+            "workflow_name": workflow_data.get("name"),
+            "description": workflow_data.get("description"),
+            "jobPayloadSchema": workflow_data.get("jobPayloadSchema", {}),
+            "jobResultsPayloadSchema": workflow_data.get("jobResultsPayloadSchema", {})
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error fetching workflow input schema")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch workflow input schema: {str(e)}")
+
+#Add endpoint to trigger Opus workflow
+
+@app.post("/run_opus")
+async def run_opus(payload: dict, workflow_id: Optional[str] = None):
+    """
+    Run Opus workflow asynchronously - returns immediately with jobExecutionId.
+    
+    Args:
+        payload: The job payload matching the workflow's jobPayloadSchema
+        workflow_id: Optional workflow ID. If not provided, uses OPUS_WORKFLOW_ID from environment.
+    """
+    result = await call_opus_workflow(payload, workflow_id)
+    return {
+        "message": "Workflow started",
+        "jobExecutionId": result.get("jobExecutionId"),
+        "run_id": result.get("run_id"),  # For backward compatibility
+        "status": result.get("status"),
+        "opus_response": result
+    }
+
+#add polling
+
+async def poll_opus_run(job_execution_id: str):
+    """
+    Poll Opus job execution status.
+    Uses GET /job/execution/{jobExecutionId} or similar endpoint.
+    """
+    # Support both OPUS_API_KEY and OPUS_SERVICE_KEY
+    service_key = OPUS_API_KEY or OPUS_SERVICE_KEY
+    if not service_key:
+        raise HTTPException(
+            status_code=500, 
+            detail="OPUS_API_KEY or OPUS_SERVICE_KEY not configured. Please set one in .env file."
+        )
+    
+    # Try different endpoint formats for job status
+    endpoint_formats = [
+        f"{OPUS_BASE_URL.rstrip('/')}/api/v1/job-execution/{job_execution_id}",
+        f"{OPUS_BASE_URL.rstrip('/')}/api/v1/job-executions/{job_execution_id}",
+        f"{OPUS_BASE_URL.rstrip('/')}/api/v1/job/execution/{job_execution_id}",
+        f"{OPUS_BASE_URL.rstrip('/')}/api/v1/job/{job_execution_id}",
+        f"{OPUS_BASE_URL.rstrip('/')}/api/v1/jobs/{job_execution_id}",
+        f"{OPUS_BASE_URL.rstrip('/')}/job-execution/{job_execution_id}",
+        f"{OPUS_BASE_URL.rstrip('/')}/job/execution/{job_execution_id}",
+    ]
+    
+    headers = { "x-service-key": service_key }
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        # Try to find the correct endpoint format first
+        working_url = None
+        for url in endpoint_formats:
+            try:
+                r = await client.get(url, headers=headers)
+                if r.status_code != 404:
+                    working_url = url
+                    logger.info(f"Using polling endpoint: {url}")
+                    break
+            except:
+                continue
+        
+        if not working_url:
+            # If no endpoint works, use the first one and let it fail with proper error
+            working_url = endpoint_formats[0]
+            logger.warning(f"No working polling endpoint found, using: {working_url}")
+        
+        for attempt in range(30):  # wait ~30 seconds total
+            try:
+                r = await client.get(working_url, headers=headers)
+                r.raise_for_status()
+                data = r.json()
+                if data.get("status") in ["success", "failed", "completed", "error"]:
+                    return data
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"Poll attempt {attempt + 1} failed: {e.response.status_code}")
+                if attempt == 29:  # Last attempt
+                    raise HTTPException(
+                        status_code=e.response.status_code,
+                        detail=f"Opus polling failed: {e.response.status_code} - {e.response.text[:500]}"
+                    )
+            except httpx.RequestError as e:
+                logger.warning(f"Poll attempt {attempt + 1} request error: {str(e)}")
+                if attempt == 29:  # Last attempt
+                    raise HTTPException(status_code=500, detail=f"Opus polling request failed: {str(e)}")
+            except Exception as e:
+                logger.warning(f"Poll attempt {attempt + 1} error: {str(e)}")
+            
+            await asyncio.sleep(1)
+
+    raise HTTPException(status_code=500, detail="Opus run timeout after 30 attempts")
+
+#Add end point
+@app.post("/run_opus_sync")
+async def run_opus_sync(payload: dict, workflow_id: Optional[str] = None):
+    """
+    Run Opus workflow synchronously - waits for completion.
+    
+    Args:
+        payload: The job payload matching the workflow's jobPayloadSchema
+        workflow_id: Optional workflow ID. If not provided, uses OPUS_WORKFLOW_ID from environment.
+    """
+    start = await call_opus_workflow(payload, workflow_id)
+    job_execution_id = start.get("jobExecutionId") or start.get("run_id")
+
+    if not job_execution_id:
+        raise HTTPException(
+            status_code=500,
+            detail="No jobExecutionId returned from workflow initiation"
+        )
+
+    final = await poll_opus_run(job_execution_id)
+    return {
+        "jobExecutionId": job_execution_id,
+        "run_id": job_execution_id,  # For backward compatibility
+        "final_status": final.get("status"),
+        "output": final.get("output") or final.get("result"),
+        "full_response": final
+    }
+
+                             
 # ---------------------------
 # Pydantic models (requests)
 # ---------------------------
@@ -272,7 +738,18 @@ def root():
     return {
         "message": "Xakot × Opus AI — Document Processing Pipeline",
         "version": "2.0.0",
-        "endpoints": {"documentation": "/docs", "trace_viewer": "/web/trace_viewer.html", "api_base": "/"}
+        "endpoints": {
+            "documentation": "/docs",
+            "trace_viewer": "/web/trace_viewer.html",
+            "api_base": "/",
+            "opus": {
+                "test_connection": "/opus/test",
+                "workflow_schema": "/opus/workflow/schema",
+                "workflow_input_schema": "/opus/workflow/schema/inputs",
+                "run_workflow": "/run_opus",
+                "run_workflow_sync": "/run_opus_sync"
+            }
+        }
     }
 
 
@@ -738,3 +1215,8 @@ async def metrics_export(req: MetricsExportRequest = Body(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+
+
+#creating env
+#PS C:\Users\ESSO\Downloads\AI-Hackathon-Xakot> python -m venv .venv
+#\Users\ESSO\Downloads\AI-Hackathon-Xakot> pip install -r requirements.txt
